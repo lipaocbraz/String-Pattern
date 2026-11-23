@@ -3,9 +3,9 @@ entre si e contra um oráculo independente (str.find)."""
 import random
 import subprocess
 import sys
+import tempfile
+import unittest
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
@@ -14,7 +14,8 @@ from io_utils import read_case  # noqa: E402
 from kmp import kmp_search  # noqa: E402
 from naive import naive_search  # noqa: E402
 
-CLI = ROOT / "c" / "bin" / "cli"
+CLI = ROOT / "c" / "bin" / ("cli.exe" if sys.platform == "win32" else "cli")
+DATA = ROOT / "data"
 
 
 def oracle(t: str, p: str) -> tuple[int, int]:
@@ -45,29 +46,34 @@ def check_dir(d: Path) -> None:
     assert c_search("kmp", d) == expected
 
 
-EDGE_DIRS = sorted((ROOT / "data" / "edge").glob("*")) if (ROOT / "data" / "edge").is_dir() else []
+CASE_TYPES = ("random", "worst", "best")
 
 
-def test_edge_data_present():
-    assert EDGE_DIRS, "rode `make data` antes dos testes"
+class SearchCorrectness(unittest.TestCase):
+    def test_edge(self):
+        cases = sorted((DATA / "edge").glob("*"))
+        self.assertTrue(cases, "rode `make data` antes dos testes")
+        for case in cases:
+            with self.subTest(case=case.name):
+                check_dir(case)
 
+    def test_random_small(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            for seed in range(30):
+                with self.subTest(seed=seed):
+                    rng = random.Random(seed)
+                    alphabet = rng.choice(["ab", "abc", "ACGT"])
+                    t = "".join(rng.choices(alphabet, k=rng.randint(1, 200)))
+                    p = "".join(rng.choices(alphabet, k=rng.randint(1, 6)))
+                    (path / "T.txt").write_text(t, encoding="ascii")
+                    (path / "P.txt").write_text(p, encoding="ascii")
+                    check_dir(path)
 
-@pytest.mark.parametrize("d", EDGE_DIRS, ids=lambda d: d.name)
-def test_edge(d):
-    check_dir(d)
-
-
-@pytest.mark.parametrize("seed", range(30))
-def test_random_small(tmp_path, seed):
-    rng = random.Random(seed)
-    alphabet = rng.choice(["ab", "abc", "ACGT"])
-    t = "".join(rng.choices(alphabet, k=rng.randint(1, 200)))
-    p = "".join(rng.choices(alphabet, k=rng.randint(1, 6)))
-    (tmp_path / "T.txt").write_text(t)
-    (tmp_path / "P.txt").write_text(p)
-    check_dir(tmp_path)
-
-
-@pytest.mark.parametrize("d", sorted((ROOT / "data" / "exp1").glob("*/n1000_*")), ids=lambda d: d.parent.name)
-def test_exp1_smallest(d):
-    check_dir(d)
+    def test_exp1_smallest(self):
+        cases = (DATA / "cases.txt").read_text(encoding="ascii").splitlines()
+        for kind in CASE_TYPES:
+            with self.subTest(kind=kind):
+                group = [case for case in cases if case.startswith(f"exp1/{kind}/")]
+                self.assertTrue(group, "rode `make data` antes dos testes")
+                check_dir(DATA / group[0])
