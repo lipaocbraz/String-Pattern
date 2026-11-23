@@ -1,77 +1,121 @@
-/* Uso: bench [data_dir]  ->  CSV em stdout
- * Percorre exp1 (random, worst, best) e exp2 (worst) sob data_dir.
- * Cada medida é a média de várias repetições (>= 0.2 s no total ou 1000 reps). */
-#include <dirent.h>
+/* Uso: bench [data_dir]  ->  CSV em stdout */
+#define _POSIX_C_SOURCE 200809L
+
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <time.h>
+#endif
 
 #include "io.h"
 #include "search.h"
 
 typedef Result (*SearchFn)(const char *, size_t, const char *, size_t);
 
+enum { REPETITIONS = 20, WARMUP = 3 };
+
+#ifdef _WIN32
+static LARGE_INTEGER ticks_per_second;
+#endif
+
 static double now(void) {
+#ifdef _WIN32
+    LARGE_INTEGER ticks;
+    QueryPerformanceCounter(&ticks);
+    return (double)ticks.QuadPart / ticks_per_second.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
 }
 
-static void run_case(const char *exp, const char *type, const char *dir) {
-    char path[1024];
+static int run_case(const char *root, const char *dir) {
+    char path[1536], exp[16], type[16];
+    if (sscanf(dir, "%15[^/]/%15[^/]", exp, type) != 2) {
+        fprintf(stderr, "caso inválido: %s\n", dir);
+        return 0;
+    }
+
     size_t n, m;
-    snprintf(path, sizeof path, "%s/T.txt", dir);
+    snprintf(path, sizeof path, "%s/%s/T.txt", root, dir);
     char *T = read_file(path, &n);
-    snprintf(path, sizeof path, "%s/P.txt", dir);
+    snprintf(path, sizeof path, "%s/%s/P.txt", root, dir);
     char *P = read_file(path, &m);
     if (!T || !P) {
-        fprintf(stderr, "pulando %s\n", dir);
+        fprintf(stderr, "erro ao ler %s\n", dir);
         free(T);
         free(P);
-        return;
+        return 0;
     }
 
     const char *names[] = {"naive", "kmp"};
     SearchFn fns[] = {naive_search, kmp_search};
     for (int a = 0; a < 2; a++) {
-        Result r = fns[a](T, n, P, m); /* aquecimento + resultado */
-        int reps = 0;
-        double t0 = now(), elapsed;
-        do {
+        for (int j = 0; j < WARMUP; j++) {
+            fns[a](T, n, P, m);
+        }
+
+        Result r = {0, 0};
+        double mean = 0, sum_squares = 0;
+        for (int j = 1; j <= REPETITIONS; j++) {
+            double start = now();
             r = fns[a](T, n, P, m);
-            reps++;
-            elapsed = now() - t0;
-        } while (elapsed < 0.2 && reps < 1000);
-        printf("%s,%s,%zu,%zu,%s,%.9f,%zu,%u\n", exp, type, n, m, names[a],
-               elapsed / reps, r.count, r.checksum);
-        fflush(stdout);
+            double elapsed = now() - start;
+            double delta = elapsed - mean;
+            mean += delta / j;
+            sum_squares += delta * (elapsed - mean);
+        }
+        double deviation = sqrt(sum_squares / (REPETITIONS - 1));
+        printf("%s,%s,%zu,%zu,%s,%.12f,%zu,%u,%.12f,%d\n",
+               exp, type, n, m, names[a], mean, r.count, r.checksum, deviation, REPETITIONS);
     }
     free(T);
     free(P);
-}
-
-static void run_group(const char *root, const char *exp, const char *type) {
-    char base[1024];
-    snprintf(base, sizeof base, "%s/%s/%s", root, exp, type);
-    DIR *d = opendir(base);
-    if (!d) return;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] != 'n') continue;
-        char dir[1536];
-        snprintf(dir, sizeof dir, "%s/%s", base, e->d_name);
-        run_case(exp, type, dir);
-    }
-    closedir(d);
+    return 1;
 }
 
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] : "data";
-    printf("exp,type,n,m,algo,time_s,count,checksum\n");
-    run_group(root, "exp1", "random");
-    run_group(root, "exp1", "worst");
-    run_group(root, "exp1", "best");
-    run_group(root, "exp2", "worst");
-    return 0;
+    char path[1024];
+    if (snprintf(path, sizeof path, "%s/cases.txt", root) >= (int)sizeof path) {
+        fprintf(stderr, "caminho de dados longo demais\n");
+        return 1;
+    }
+    FILE *cases = fopen(path, "r");
+    if (!cases) {
+        fprintf(stderr, "erro ao abrir %s; rode make data\n", path);
+        return 1;
+    }
+#ifdef _WIN32
+    if (!QueryPerformanceFrequency(&ticks_per_second)) {
+        fprintf(stderr, "relógio de alta resolução indisponível\n");
+        fclose(cases);
+        return 1;
+    }
+#endif
+
+    puts("exp,type,n,m,algo,time_s,count,checksum,stddev_s,repetitions");
+    char dir[256];
+    size_t count = 0;
+    while (fscanf(cases, "%255s", dir) == 1) {
+        if (!run_case(root, dir)) {
+            fclose(cases);
+            return 1;
+        }
+        count++;
+    }
+    int failed = ferror(cases);
+    fclose(cases);
+    if (failed || count == 0) {
+        fprintf(stderr, "erro ao ler os casos em %s\n", path);
+        return 1;
+    }
+    return fflush(stdout) == EOF;
 }
